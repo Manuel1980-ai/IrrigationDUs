@@ -1,0 +1,772 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Uniformidad de Riego</title>
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Uniformidad Riego">
+  <meta name="theme-color" content="#e8f5e9">
+  <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800;900&display=swap" rel="stylesheet">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Nunito', sans-serif; background: #e8f5e9; min-height: 100vh; }
+    input, button, select { -webkit-appearance: none; font-family: 'Nunito', sans-serif; }
+    input[type=number]::-webkit-inner-spin-button,
+    input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script>
+    (function() {
+      var m = { name:"Uniformidad Riego", short_name:"Uniformidad", start_url:"/", display:"standalone", background_color:"#e8f5e9", theme_color:"#e8f5e9", orientation:"portrait" };
+      var blob = new Blob([JSON.stringify(m)], {type:"application/manifest+json"});
+      var l = document.createElement("link"); l.rel="manifest"; l.href=URL.createObjectURL(blob);
+      document.head.appendChild(l);
+    })();
+  </script>
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    const KEY_SESSIONS = "uniformidad_sessions_v3";
+    const KEY_LANG = "uniformidad_lang_v1";
+    function loadSessions() { try { return JSON.parse(localStorage.getItem(KEY_SESSIONS)||"[]"); } catch { return []; } }
+    function saveSessions(s) { try { localStorage.setItem(KEY_SESSIONS,JSON.stringify(s)); } catch {} }
+    function loadLang() { try { return localStorage.getItem(KEY_LANG)||"es"; } catch { return "es"; } }
+    function saveLang(l) { try { localStorage.setItem(KEY_LANG,l); } catch {} }
+    function fmtDate(iso) {
+      const d=new Date(iso);
+      return d.toLocaleDateString("es-MX",{day:"2-digit",month:"short",year:"numeric"})+" "+d.toLocaleTimeString("es-MX",{hour:"2-digit",minute:"2-digit"});
+    }
+    function fmtCoord(n) { return n.toFixed(6); }
+    function mapsLink(lat,lng) { return `https://www.google.com/maps?q=${lat},${lng}`; }
+    function earthLink(lat,lng) { return `https://earth.google.com/web/@${lat},${lng},100a,500d`; }
+
+    // ── KML Export ────────────────────────────────────────────────────────────
+    function generateKML(session) {
+      const pts = session.readings.map((v,i)=>({
+        v, i, gps: session.gps[i],
+        flow: session.gps[i] ? toFlowStatic(v, session.sistCaudal, session.duracion) : null
+      })).filter(p=>p.gps);
+      if (!pts.length) return null;
+      const placemarks = pts.map(p=>`
+    <Placemark>
+      <name>Captador #${p.i+1}</name>
+      <description><![CDATA[
+        <b>Campo:</b> ${session.field||"—"}<br/>
+        <b>Sector:</b> ${session.sector||"—"}<br/>
+        <b>Emisor:</b> ${session.emisor||"—"}<br/>
+        <b>Lámina:</b> ${p.v} ${session.unidad}<br/>
+        <b>Caudal:</b> ${p.flow!==null?p.flow.toFixed(2):"—"} ${session.sistCaudal}<br/>
+        <b>DU:</b> ${session.results.du.toFixed(1)}% | <b>CV:</b> ${session.results.cv.toFixed(1)}%<br/>
+        <b>Fecha:</b> ${fmtDate(session.date)}
+      ]]></description>
+      <Style><IconStyle><color>ff2196F3</color><scale>1.2</scale>
+        <Icon><href>https://maps.google.com/mapfiles/kml/paddle/wht-blank.png</href></Icon>
+      </IconStyle></Style>
+      <Point><coordinates>${p.gps.lng},${p.gps.lat},0</coordinates></Point>
+    </Placemark>`).join("");
+      return `<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+  <Document>
+    <name>${session.field||"Uniformidad"} – ${fmtDate(session.date)}</name>
+    <description>DU: ${session.results.du.toFixed(1)}% | CV: ${session.results.cv.toFixed(1)}% | n=${session.results.n}</description>
+    ${placemarks}
+  </Document>
+</kml>`;
+    }
+
+    // ── CSV Export ────────────────────────────────────────────────────────────
+    function generateCSV(session) {
+      const rows = [["Captador","Lamina_"+session.unidad,"Caudal_"+session.sistCaudal,"Latitud","Longitud","Maps_Link","DU_%","CV_%","Campo","Sector","Emisor","Duracion_min","Fecha"]];
+      session.readings.forEach((v,i)=>{
+        const gps = session.gps[i];
+        const flow = toFlowStatic(v, session.sistCaudal, session.duracion);
+        rows.push([
+          i+1, v||"",
+          flow!==null?flow.toFixed(3):"",
+          gps?fmtCoord(gps.lat):"", gps?fmtCoord(gps.lng):"",
+          gps?mapsLink(gps.lat,gps.lng):"",
+          session.results.du.toFixed(1), session.results.cv.toFixed(1),
+          session.field||"", session.sector||"", session.emisor||"",
+          session.duracion||"", fmtDate(session.date)
+        ]);
+      });
+      return rows.map(r=>r.map(c=>`"${String(c).replace(/"/g,'""')}"`).join(",")).join("\n");
+    }
+
+    function toFlowStatic(depth, sistCaudal, duracion) {
+      const d=parseFloat(depth), dur=parseFloat(duracion)||60;
+      if (isNaN(d)||d<0) return null;
+      return sistCaudal==="LPH" ? d*60/dur/1000 : d*60/dur/128;
+    }
+
+    function downloadFile(content, filename, mime) {
+      const blob = new Blob([content],{type:mime});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href=url; a.download=filename; a.click();
+      URL.revokeObjectURL(url);
+    }
+
+    // ── Translations ──────────────────────────────────────────────────────────
+    const LANGS = {
+      es:{
+        appTitle:"Uniformidad de Riego",
+        tabs:{med:"Medición",hist:"Historial",help:"Ayuda"},
+        fField:"Campo",fSector:"Sector / Bloque",fEmisor:"Tipo de emisor",fSelectEmisor:"Seleccionar…",
+        fUnit:"Unidad de medición (captadores)",
+        fCaudal:"Caudal de diseño del emisor",fOpt:"Opcional",
+        fDuration:"Duración del ensayo",fDurUnit:"min",
+        fDurHint:"Tiempo que el sistema estuvo en operación durante la prueba.",
+        fNumMed:"Número de mediciones",fMinMax:"Mínimo 2 · Máximo 24 · Para DU se requieren ≥4",
+        fReadings:"Lecturas de captadores",colCap:"Captador",colDepth:"Lámina",colFlow:"Caudal",colGPS:"GPS",
+        medCount:(n,t)=>`${n} / ${t} mediciones`,fFormula:(d)=>`· Fórmula: ml × 60 ÷ ${d} min`,fAvg:"· Promedio:",
+        resTitle:(n)=>`Resultados — ${n} captadores`,
+        vsDesign:"Comparación vs. Caudal de Diseño",bDesign:"Diseño",bMeasured:"Medido",bEff:"Eficiencia",
+        rEfficient:"Eficiente",rAcceptable:"Aceptable",rLow:"Baja efic.",rPoor:"Deficiente",devTitle:"Desviación por captador",
+        duLabel:"DU — Uniformidad de Distribución",duDesc:(n)=>`Promedio del 25% inferior vs. media total. Considera ${n} captador(es) más bajos.`,
+        cvLabel:"CV — Coeficiente de Variación",cvDesc:"Variabilidad relativa entre captadores. ≤10% excelente, ≤20% bueno, ≤30% aceptable.",
+        statsTitle:"Estadísticos",sSave:"Guardar medición",sSaved:"✓ Guardado",sClear:"Limpiar lecturas",
+        emptyHist:"Sin mediciones guardadas",emptyHistSub:"Guarda tu primera medición en la pestaña Medición",
+        minReadings:"Ingresa al menos 2 lecturas para ver los resultados",
+        rExc:"Excelente",rGood:"Bueno",rAcc:"Aceptable",rDef:"Deficiente",
+        emisores:["Goteo","Microaspersor","Goteo integrado","Emisor compensado","Cinta de goteo"],
+        gpsPinning:"Capturando GPS…",gpsOk:"GPS capturado",gpsErr:"Error GPS",gpsNone:"Sin GPS",
+        exportKML:"Exportar KML",exportCSV:"Exportar CSV",exportNoGPS:"Sin puntos GPS para exportar",
+        viewMaps:"Maps",viewEarth:"Earth",gpsPoints:(n)=>`${n} punto(s) GPS`,
+        hCoefs:"Coeficientes calculados",hDuName:"DU – Distribución",hDuFormula:"100 × (x̄₂₅% / x̄)",
+        hDuDesc:"Compara el promedio del 25% más bajo vs. la media total. Excelente ≥90%.",
+        hCvName:"CV – Coef. Variación",hCvFormula:"100 × (DE / x̄)",
+        hCvDesc:"Dispersión relativa. Excelente ≤10%, Bueno ≤20%, Aceptable ≤30%.",
+        hClass:"Clasificación de uniformidad",hCat:"Categoría",hDu:"DU",hCv:"CV",
+        hRef:"Rangos según ASABE/FAO para sistemas de goteo y microaspersión.",
+        hProtocol:"Protocolo de campo",
+        hSteps:["Mide la presión del sistema antes de iniciar: registra la presión en la entrada del lateral y al final del ramal con un manómetro. La presión de operación debe estar dentro del rango especificado por el fabricante del emisor.","Coloca captadores en línea a lo largo del lateral de riego.","Distribuye uniformemente entre emisores (al menos 1 por intervalo).","Ejecuta el sistema a presión normal durante 30–60 min.","Mide el volumen o altura acumulada en cada captador.","Toca el botón 📍 en cada captador para guardar su ubicación GPS.","Ingresa las lecturas y guarda la sesión.","Repite en diferentes laterales para una evaluación completa del sector."],
+        hRows:[{cat:"Excelente",du:"≥ 90%",cv:"≤ 10%",color:"#166534",bg:"#dcfce7"},{cat:"Bueno",du:"80–90%",cv:"10–20%",color:"#1d4ed8",bg:"#dbeafe"},{cat:"Aceptable",du:"70–80%",cv:"20–30%",color:"#92400e",bg:"#fef3c7"},{cat:"Deficiente",du:"< 70%",cv:"> 30%",color:"#991b1b",bg:"#fee2e2"}],
+      },
+      en:{
+        appTitle:"Irrigation Uniformity",
+        tabs:{med:"Measurement",hist:"History",help:"Help"},
+        fField:"Field",fSector:"Sector / Block",fEmisor:"Emitter type",fSelectEmisor:"Select…",
+        fUnit:"Measurement unit (catch cans)",
+        fCaudal:"Emitter design flow rate",fOpt:"Optional",
+        fDuration:"Test duration",fDurUnit:"min",fDurHint:"Time the system was in operation during the test.",
+        fNumMed:"Number of measurements",fMinMax:"Min 2 · Max 24 · DU requires ≥4",
+        fReadings:"Catch can readings",colCap:"Can",colDepth:"Depth",colFlow:"Flow",colGPS:"GPS",
+        medCount:(n,t)=>`${n} / ${t} measurements`,fFormula:(d)=>`· Formula: ml × 60 ÷ ${d} min`,fAvg:"· Average:",
+        resTitle:(n)=>`Results — ${n} catch cans`,
+        vsDesign:"Comparison vs. Design Flow",bDesign:"Design",bMeasured:"Measured",bEff:"Efficiency",
+        rEfficient:"Efficient",rAcceptable:"Acceptable",rLow:"Low effic.",rPoor:"Poor",devTitle:"Deviation per catch can",
+        duLabel:"DU — Distribution Uniformity",duDesc:(n)=>`Average of lowest 25% vs. total mean. Considers ${n} lowest can(s).`,
+        cvLabel:"CV — Coefficient of Variation",cvDesc:"Relative variability. ≤10% excellent, ≤20% good, ≤30% acceptable.",
+        statsTitle:"Statistics",sSave:"Save measurement",sSaved:"✓ Saved",sClear:"Clear readings",
+        emptyHist:"No measurements saved",emptyHistSub:"Save your first measurement in the Measurement tab",
+        minReadings:"Enter at least 2 readings to see results",
+        rExc:"Excellent",rGood:"Good",rAcc:"Acceptable",rDef:"Poor",
+        emisores:["Drip","Micro-sprinkler","Inline drip","Pressure-compensating","Drip tape"],
+        gpsPinning:"Getting GPS…",gpsOk:"GPS saved",gpsErr:"GPS error",gpsNone:"No GPS",
+        exportKML:"Export KML",exportCSV:"Export CSV",exportNoGPS:"No GPS points to export",
+        viewMaps:"Maps",viewEarth:"Earth",gpsPoints:(n)=>`${n} GPS point(s)`,
+        hCoefs:"Calculated coefficients",hDuName:"DU – Distribution",hDuFormula:"100 × (x̄₂₅% / x̄)",
+        hDuDesc:"Average of lowest 25% vs. total mean. Excellent ≥90%.",
+        hCvName:"CV – Coeff. of Variation",hCvFormula:"100 × (SD / x̄)",
+        hCvDesc:"Relative dispersion. Excellent ≤10%, Good ≤20%, Acceptable ≤30%.",
+        hClass:"Uniformity classification",hCat:"Category",hDu:"DU",hCv:"CV",
+        hRef:"Ranges per ASABE/FAO for drip and micro-sprinkler systems.",
+        hProtocol:"Field protocol",
+        hSteps:["Measure system pressure before starting: record pressure at the lateral inlet and end of line with a pressure gauge. Operating pressure must be within the manufacturer's specified range.","Place catch cans in line along the irrigation lateral.","Distribute evenly between emitters (at least 1 per interval).","Run the system at normal pressure for 30–60 min.","Measure the volume or depth in each catch can.","Tap the 📍 button on each can to save its GPS location.","Enter the readings and save the session.","Repeat on different laterals for a complete sector evaluation."],
+        hRows:[{cat:"Excellent",du:"≥ 90%",cv:"≤ 10%",color:"#166534",bg:"#dcfce7"},{cat:"Good",du:"80–90%",cv:"10–20%",color:"#1d4ed8",bg:"#dbeafe"},{cat:"Acceptable",du:"70–80%",cv:"20–30%",color:"#92400e",bg:"#fef3c7"},{cat:"Poor",du:"< 70%",cv:"> 30%",color:"#991b1b",bg:"#fee2e2"}],
+      },
+      fr:{
+        appTitle:"Uniformité d'Irrigation",
+        tabs:{med:"Mesure",hist:"Historique",help:"Aide"},
+        fField:"Parcelle",fSector:"Secteur / Bloc",fEmisor:"Type d'émetteur",fSelectEmisor:"Sélectionner…",
+        fUnit:"Unité de mesure (récupérateurs)",
+        fCaudal:"Débit de conception",fOpt:"Facultatif",
+        fDuration:"Durée du test",fDurUnit:"min",fDurHint:"Temps de fonctionnement du système pendant le test.",
+        fNumMed:"Nombre de mesures",fMinMax:"Min 2 · Max 24 · DU nécessite ≥4",
+        fReadings:"Lectures des récupérateurs",colCap:"Récup.",colDepth:"Hauteur",colFlow:"Débit",colGPS:"GPS",
+        medCount:(n,t)=>`${n} / ${t} mesures`,fFormula:(d)=>`· Formule: ml × 60 ÷ ${d} min`,fAvg:"· Moyenne:",
+        resTitle:(n)=>`Résultats — ${n} récupérateurs`,
+        vsDesign:"Comparaison vs. Débit de conception",bDesign:"Conception",bMeasured:"Mesuré",bEff:"Efficacité",
+        rEfficient:"Efficace",rAcceptable:"Acceptable",rLow:"Faible",rPoor:"Insuffisant",devTitle:"Écart par récupérateur",
+        duLabel:"DU — Uniformité de Distribution",duDesc:(n)=>`Moyenne des 25% inférieurs. Considère ${n} récupérateur(s).`,
+        cvLabel:"CV — Coefficient de Variation",cvDesc:"Variabilité relative. ≤10% excellent, ≤20% bon, ≤30% acceptable.",
+        statsTitle:"Statistiques",sSave:"Enregistrer",sSaved:"✓ Enregistré",sClear:"Effacer",
+        emptyHist:"Aucune mesure",emptyHistSub:"Enregistrez votre première mesure",
+        minReadings:"Entrez au moins 2 lectures pour voir les résultats",
+        rExc:"Excellent",rGood:"Bon",rAcc:"Acceptable",rDef:"Insuffisant",
+        emisores:["Goutte-à-goutte","Micro-asperseur","Intégré","Compensé","Ruban"],
+        gpsPinning:"GPS en cours…",gpsOk:"GPS enregistré",gpsErr:"Erreur GPS",gpsNone:"Sans GPS",
+        exportKML:"Exporter KML",exportCSV:"Exporter CSV",exportNoGPS:"Aucun point GPS",
+        viewMaps:"Maps",viewEarth:"Earth",gpsPoints:(n)=>`${n} point(s) GPS`,
+        hCoefs:"Coefficients calculés",hDuName:"DU – Distribution",hDuFormula:"100 × (x̄₂₅% / x̄)",
+        hDuDesc:"Moyenne des 25% inférieurs vs. moyenne totale. Excellent ≥90%.",
+        hCvName:"CV – Coeff. de Variation",hCvFormula:"100 × (ET / x̄)",
+        hCvDesc:"Dispersion relative. Excellent ≤10%, Bon ≤20%, Acceptable ≤30%.",
+        hClass:"Classification",hCat:"Catégorie",hDu:"DU",hCv:"CV",
+        hRef:"Plages selon ASABE/FAO.",hProtocol:"Protocole de terrain",
+        hSteps:["Mesurez la pression du système avant de commencer.","Placez les récupérateurs en ligne.","Distribuez uniformément entre les émetteurs.","Faites fonctionner le système 30–60 min.","Mesurez le volume dans chaque récupérateur.","Touchez 📍 pour enregistrer la position GPS de chaque récupérateur.","Entrez les lectures et enregistrez.","Répétez sur différents lateraux."],
+        hRows:[{cat:"Excellent",du:"≥ 90%",cv:"≤ 10%",color:"#166534",bg:"#dcfce7"},{cat:"Bon",du:"80–90%",cv:"10–20%",color:"#1d4ed8",bg:"#dbeafe"},{cat:"Acceptable",du:"70–80%",cv:"20–30%",color:"#92400e",bg:"#fef3c7"},{cat:"Insuffisant",du:"< 70%",cv:"> 30%",color:"#991b1b",bg:"#fee2e2"}],
+      },
+      de:{
+        appTitle:"Bewässerungs-Uniformität",
+        tabs:{med:"Messung",hist:"Verlauf",help:"Hilfe"},
+        fField:"Feld",fSector:"Sektor / Block",fEmisor:"Emittertyp",fSelectEmisor:"Auswählen…",
+        fUnit:"Messeinheit (Behälter)",
+        fCaudal:"Auslegungsdurchfluss",fOpt:"Optional",
+        fDuration:"Testdauer",fDurUnit:"min",fDurHint:"Betriebszeit des Systems während des Tests.",
+        fNumMed:"Anzahl der Messungen",fMinMax:"Min 2 · Max 24 · DU erfordert ≥4",
+        fReadings:"Messwerte",colCap:"Behälter",colDepth:"Tiefe",colFlow:"Durchfluss",colGPS:"GPS",
+        medCount:(n,t)=>`${n} / ${t} Messungen`,fFormula:(d)=>`· Formel: ml × 60 ÷ ${d} min`,fAvg:"· Mittelwert:",
+        resTitle:(n)=>`Ergebnisse — ${n} Behälter`,
+        vsDesign:"Vergleich vs. Auslegung",bDesign:"Auslegung",bMeasured:"Gemessen",bEff:"Effizienz",
+        rEfficient:"Effizient",rAcceptable:"Akzeptabel",rLow:"Niedrig",rPoor:"Mangelhaft",devTitle:"Abweichung pro Behälter",
+        duLabel:"DU — Verteilungsgleichmäßigkeit",duDesc:(n)=>`Unterste 25% vs. Gesamtmittel. ${n} Behälter.`,
+        cvLabel:"CV — Variationskoeffizient",cvDesc:"Relative Variabilität. ≤10% ausgezeichnet, ≤20% gut, ≤30% akzeptabel.",
+        statsTitle:"Statistiken",sSave:"Speichern",sSaved:"✓ Gespeichert",sClear:"Löschen",
+        emptyHist:"Keine Messungen",emptyHistSub:"Speichern Sie Ihre erste Messung",
+        minReadings:"Mindestens 2 Messwerte eingeben",
+        rExc:"Ausgezeichnet",rGood:"Gut",rAcc:"Akzeptabel",rDef:"Mangelhaft",
+        emisores:["Tropfer","Micro-Sprinkler","Eingebettet","Druckausgleich","Tropfband"],
+        gpsPinning:"GPS läuft…",gpsOk:"GPS gespeichert",gpsErr:"GPS-Fehler",gpsNone:"Kein GPS",
+        exportKML:"KML exportieren",exportCSV:"CSV exportieren",exportNoGPS:"Keine GPS-Punkte",
+        viewMaps:"Maps",viewEarth:"Earth",gpsPoints:(n)=>`${n} GPS-Punkt(e)`,
+        hCoefs:"Berechnete Koeffizienten",hDuName:"DU – Verteilung",hDuFormula:"100 × (x̄₂₅% / x̄)",
+        hDuDesc:"Unterste 25% vs. Gesamtmittelwert. Ausgezeichnet ≥90%.",
+        hCvName:"CV – Variationskoeffizient",hCvFormula:"100 × (SD / x̄)",
+        hCvDesc:"Relative Streuung. Ausgezeichnet ≤10%, Gut ≤20%, Akzeptabel ≤30%.",
+        hClass:"Klassifizierung",hCat:"Kategorie",hDu:"DU",hCv:"CV",
+        hRef:"Bereiche gemäß ASABE/FAO.",hProtocol:"Feldprotokoll",
+        hSteps:["Systemdruck vor dem Start messen.","Behälter entlang des Laterals aufstellen.","Gleichmäßig zwischen Emittern verteilen.","System 30–60 min betreiben.","Volumen in jedem Behälter messen.","📍 tippen um GPS-Position zu speichern.","Messwerte eingeben und speichern.","An verschiedenen Lateralen wiederholen."],
+        hRows:[{cat:"Ausgezeichnet",du:"≥ 90%",cv:"≤ 10%",color:"#166534",bg:"#dcfce7"},{cat:"Gut",du:"80–90%",cv:"10–20%",color:"#1d4ed8",bg:"#dbeafe"},{cat:"Akzeptabel",du:"70–80%",cv:"20–30%",color:"#92400e",bg:"#fef3c7"},{cat:"Mangelhaft",du:"< 70%",cv:"> 30%",color:"#991b1b",bg:"#fee2e2"}],
+      },
+      zh:{
+        appTitle:"灌溉均匀性",
+        tabs:{med:"测量",hist:"历史",help:"帮助"},
+        fField:"地块",fSector:"区块",fEmisor:"发射器类型",fSelectEmisor:"选择…",
+        fUnit:"测量单位（集水器）",
+        fCaudal:"发射器设计流量",fOpt:"可选",
+        fDuration:"测试持续时间",fDurUnit:"分钟",fDurHint:"系统在测试期间的运行时间。",
+        fNumMed:"测量数量",fMinMax:"最少2个 · 最多24个 · DU需要≥4个",
+        fReadings:"集水器读数",colCap:"集水器",colDepth:"深度",colFlow:"流量",colGPS:"GPS",
+        medCount:(n,t)=>`${n} / ${t} 个测量`,fFormula:(d)=>`· 公式：ml × 60 ÷ ${d} 分钟`,fAvg:"· 平均：",
+        resTitle:(n)=>`结果 — ${n} 个集水器`,
+        vsDesign:"与设计流量比较",bDesign:"设计",bMeasured:"测量值",bEff:"效率",
+        rEfficient:"高效",rAcceptable:"可接受",rLow:"效率低",rPoor:"不合格",devTitle:"每个集水器偏差",
+        duLabel:"DU — 分布均匀性",duDesc:(n)=>`最低25%的平均值。考虑${n}个集水器。`,
+        cvLabel:"CV — 变异系数",cvDesc:"相对变异性。≤10%优秀，≤20%良好，≤30%可接受。",
+        statsTitle:"统计数据",sSave:"保存测量",sSaved:"✓ 已保存",sClear:"清除读数",
+        emptyHist:"没有保存的测量",emptyHistSub:"在测量选项卡中保存您的第一次测量",
+        minReadings:"输入至少2个读数以查看结果",
+        rExc:"优秀",rGood:"良好",rAcc:"可接受",rDef:"不合格",
+        emisores:["滴头","微喷头","内嵌式","压力补偿","滴灌带"],
+        gpsPinning:"获取GPS…",gpsOk:"GPS已保存",gpsErr:"GPS错误",gpsNone:"无GPS",
+        exportKML:"导出KML",exportCSV:"导出CSV",exportNoGPS:"没有GPS点可导出",
+        viewMaps:"地图",viewEarth:"地球",gpsPoints:(n)=>`${n}个GPS点`,
+        hCoefs:"计算系数",hDuName:"DU – 分布",hDuFormula:"100 × (x̄₂₅% / x̄)",
+        hDuDesc:"最低25%的平均值与总平均值比较。优秀 ≥90%。",
+        hCvName:"CV – 变异系数",hCvFormula:"100 × (SD / x̄)",
+        hCvDesc:"相对离散度。优秀 ≤10%，良好 ≤20%，可接受 ≤30%。",
+        hClass:"均匀性分类",hCat:"类别",hDu:"DU",hCv:"CV",
+        hRef:"范围依据ASABE/FAO标准。",hProtocol:"田间操作规程",
+        hSteps:["开始前测量系统压力。","沿灌溉支管线性放置集水器。","在发射器之间均匀分布。","以正常压力运行系统30–60分钟。","测量每个集水器中收集的体积。","点击📍按钮保存每个集水器的GPS位置。","输入读数并保存本次测量。","在不同支管上重复进行。"],
+        hRows:[{cat:"优秀",du:"≥ 90%",cv:"≤ 10%",color:"#166534",bg:"#dcfce7"},{cat:"良好",du:"80–90%",cv:"10–20%",color:"#1d4ed8",bg:"#dbeafe"},{cat:"可接受",du:"70–80%",cv:"20–30%",color:"#92400e",bg:"#fef3c7"},{cat:"不合格",du:"< 70%",cv:"> 30%",color:"#991b1b",bg:"#fee2e2"}],
+      },
+    };
+
+    const LANG_OPTIONS=[{key:"es",label:"ES"},{key:"en",label:"EN"},{key:"fr",label:"FR"},{key:"de",label:"DE"},{key:"zh",label:"中文"}];
+
+    function calcAll(values) {
+      const n=values.length; if(n<2)return null;
+      const mean=values.reduce((a,b)=>a+b,0)/n; if(mean===0)return null;
+      const sorted=[...values].sort((a,b)=>a-b);
+      const q25=Math.max(1,Math.floor(n*0.25));
+      const meanLow=sorted.slice(0,q25).reduce((a,b)=>a+b,0)/q25;
+      const du=(meanLow/mean)*100;
+      const variance=values.reduce((a,v)=>a+Math.pow(v-mean,2),0)/(n-1);
+      const sd=Math.sqrt(variance);
+      const cv=(sd/mean)*100;
+      return {du,cv,mean,sd,n,min:sorted[0],max:sorted[n-1],q25};
+    }
+
+    function rating(val,type,t) {
+      if(type==="cv"){
+        if(val<=10)return{label:t.rExc,color:"#166534",bg:"#dcfce7",border:"#86efac"};
+        if(val<=20)return{label:t.rGood,color:"#1d4ed8",bg:"#dbeafe",border:"#93c5fd"};
+        if(val<=30)return{label:t.rAcc,color:"#92400e",bg:"#fef3c7",border:"#fcd34d"};
+        return{label:t.rDef,color:"#991b1b",bg:"#fee2e2",border:"#fca5a5"};
+      }else{
+        if(val>=90)return{label:t.rExc,color:"#166534",bg:"#dcfce7",border:"#86efac"};
+        if(val>=80)return{label:t.rGood,color:"#1d4ed8",bg:"#dbeafe",border:"#93c5fd"};
+        if(val>=70)return{label:t.rAcc,color:"#92400e",bg:"#fef3c7",border:"#fcd34d"};
+        return{label:t.rDef,color:"#991b1b",bg:"#fee2e2",border:"#fca5a5"};
+      }
+    }
+
+    function DropIcon({size=32}){
+      return(<svg width={size} height={size} viewBox="0 0 32 32" fill="none">
+        <path d="M16 4 C16 4,7 15,7 20 C7 25.5 11 29 16 29 C21 29 25 25.5 25 20 C25 15,16 4,16 4Z" fill="#1d4ed8" opacity="0.15"/>
+        <path d="M16 6 C16 6,8 16,8 20.5 C8 25.5 11.6 28 16 28 C20.4 28 24 25.5 24 20.5 C24 16,16 6,16 6Z" fill="#3b82f6"/>
+        <path d="M12 18 C11 20,11.5 23,13 24.5" stroke="#93c5fd" strokeWidth="1.5" strokeLinecap="round" opacity="0.7"/>
+      </svg>);
+    }
+
+    function PinIcon({active}){
+      return(<svg width="14" height="14" viewBox="0 0 24 24" fill={active?"#ef4444":"none"} stroke={active?"#ef4444":"#6b7280"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0118 0z"/><circle cx="12" cy="10" r="3"/>
+      </svg>);
+    }
+
+    function App(){
+      const [lang,setLang]         = useState(loadLang);
+      const [tab,setTab]           = useState("med");
+      const [sessions,setSessions] = useState(loadSessions);
+      const [field,setField]       = useState("");
+      const [sector,setSector]     = useState("");
+      const [emisor,setEmisor]     = useState("");
+      const [caudal,setCaudal]     = useState("");
+      const [sistCaudal,setSistCaudal] = useState("LPH");
+      const [duracion,setDuracion] = useState("60");
+      const [numCans,setNumCans]   = useState(4);
+      const [readings,setReadings] = useState(Array(4).fill(""));
+      const [gps,setGps]           = useState(Array(4).fill(null)); // {lat,lng,acc} per point
+      const [gpsStatus,setGpsStatus] = useState(Array(4).fill("none")); // none|loading|ok|error
+      const [saved,setSaved]       = useState(false);
+      const [showEmisor,setShowEmisor] = useState(false);
+      const [showLang,setShowLang] = useState(false);
+      const [activeInput,setActiveInput] = useState(null);
+
+      const t = LANGS[lang];
+      const changeLang=(l)=>{setLang(l);saveLang(l);setShowLang(false);setEmisor("");};
+
+      useEffect(()=>{
+        setReadings(r=>{const next=Array(numCans).fill("");r.forEach((v,i)=>{if(i<numCans)next[i]=v;});return next;});
+        setGps(g=>{const next=Array(numCans).fill(null);g.forEach((v,i)=>{if(i<numCans)next[i]=v;});return next;});
+        setGpsStatus(s=>{const next=Array(numCans).fill("none");s.forEach((v,i)=>{if(i<numCans)next[i]=v;});return next;});
+        setSaved(false);
+      },[numCans]);
+
+      const setReading=(i,val)=>{setReadings(r=>{const n=[...r];n[i]=val;return n;});setSaved(false);};
+
+      const captureGPS=(i)=>{
+        if(!navigator.geolocation){setGpsStatus(s=>{const n=[...s];n[i]="error";return n;});return;}
+        setGpsStatus(s=>{const n=[...s];n[i]="loading";return n;});
+        navigator.geolocation.getCurrentPosition(
+          pos=>{
+            const {latitude:lat,longitude:lng,accuracy:acc}=pos.coords;
+            setGps(g=>{const n=[...g];n[i]={lat,lng,acc};return n;});
+            setGpsStatus(s=>{const n=[...s];n[i]="ok";return n;});
+            setSaved(false);
+          },
+          ()=>{setGpsStatus(s=>{const n=[...s];n[i]="error";return n;});},
+          {enableHighAccuracy:true,timeout:10000}
+        );
+      };
+
+      const clearGPS=(i)=>{
+        setGps(g=>{const n=[...g];n[i]=null;return n;});
+        setGpsStatus(s=>{const n=[...s];n[i]="none";return n;});
+        setSaved(false);
+      };
+
+      const unidLectura=sistCaudal==="LPH"?"mm":"in";
+      function toFlow(depth){
+        const d=parseFloat(depth),dur=parseFloat(duracion)||60;
+        if(isNaN(d)||d<0)return null;
+        return sistCaudal==="LPH"?d*60/dur/1000:d*60/dur/128;
+      }
+      const flowValues=readings.map(r=>toFlow(r)).filter(v=>v!==null&&v>=0);
+      const results=flowValues.length>=2?calcAll(flowValues):null;
+      const caudalNum=parseFloat(caudal);
+      const hasDiseño=caudal!==""&&!isNaN(caudalNum)&&caudalNum>0;
+      const gpsCount=gps.filter(Boolean).length;
+
+      const saveSession=()=>{
+        if(!results)return;
+        const s={id:Date.now(),date:new Date().toISOString(),
+          field,sector,emisor,unidad:unidLectura,numCans,caudal,sistCaudal,duracion,
+          readings:[...readings],gps:[...gps],results:{...results},lang};
+        const updated=[s,...sessions];setSessions(updated);saveSessions(updated);setSaved(true);
+      };
+      const deleteSession=(id)=>{const u=sessions.filter(s=>s.id!==id);setSessions(u);saveSessions(u);};
+      const resetForm=()=>{setReadings(Array(numCans).fill(""));setGps(Array(numCans).fill(null));setGpsStatus(Array(numCans).fill("none"));setSaved(false);};
+
+      const handleExportKML=(session)=>{
+        const kml=generateKML(session);
+        if(!kml){alert(t.exportNoGPS);return;}
+        const name=(session.field||"uniformidad").replace(/\s+/g,"-");
+        downloadFile(kml,`${name}-${session.id}.kml`,"application/vnd.google-earth.kml+xml");
+      };
+      const handleExportCSV=(session)=>{
+        const csv=generateCSV(session);
+        const name=(session.field||"uniformidad").replace(/\s+/g,"-");
+        downloadFile(csv,`${name}-${session.id}.csv`,"text/csv;charset=utf-8;");
+      };
+
+      // ── Styles ────────────────────────────────────────────────────────────
+      const c={
+        wrap:{maxWidth:480,margin:"0 auto",minHeight:"100vh",display:"flex",flexDirection:"column"},
+        header:{background:"#fff",padding:"12px 16px 10px",borderBottom:"1px solid #d1fae5"},
+        hRow:{display:"flex",alignItems:"center",justifyContent:"space-between"},
+        logo:{display:"flex",alignItems:"center",gap:8},
+        title:{fontSize:22,fontWeight:900,color:"#1d4ed8",letterSpacing:-0.5},
+        langArea:{position:"relative"},
+        langBtn:{background:"#eff6ff",border:"1.5px solid #bfdbfe",borderRadius:8,padding:"5px 10px",fontSize:13,fontWeight:800,color:"#1d4ed8",cursor:"pointer"},
+        langDrop:{position:"absolute",right:0,top:"110%",background:"#fff",borderRadius:10,border:"1.5px solid #bfdbfe",boxShadow:"0 4px 16px rgba(0,0,0,0.1)",overflow:"hidden",zIndex:100,minWidth:80},
+        langOpt:sel=>({display:"block",width:"100%",padding:"9px 14px",border:"none",background:sel?"#eff6ff":"transparent",color:sel?"#1d4ed8":"#374151",fontWeight:sel?800:600,fontSize:14,cursor:"pointer",textAlign:"left",fontFamily:"'Nunito',sans-serif"}),
+        tabs:{display:"flex",background:"#f0fdf4",borderBottom:"1px solid #d1fae5"},
+        tab:a=>({flex:1,padding:"10px 0",textAlign:"center",fontWeight:700,fontSize:13,border:"none",background:a?"#fff":"transparent",color:a?"#1d4ed8":"#6b7280",cursor:"pointer",borderBottom:a?"2px solid #3b82f6":"2px solid transparent"}),
+        body:{flex:1,padding:"14px 14px 24px",overflowY:"auto"},
+        card:{background:"#fff",borderRadius:16,padding:"14px",marginBottom:12,boxShadow:"0 1px 4px rgba(0,0,0,0.06)"},
+        lbl:{fontSize:11,fontWeight:700,color:"#6b7280",textTransform:"uppercase",letterSpacing:0.5,marginBottom:4},
+        inp:{width:"100%",border:"1.5px solid #bfdbfe",borderRadius:10,padding:"10px 12px",fontSize:16,fontFamily:"'Nunito',sans-serif",fontWeight:600,color:"#1e3a8a",background:"#eff6ff",outline:"none"},
+        selBtn:sel=>({width:"100%",border:sel?"2px solid #3b82f6":"1.5px solid #bfdbfe",borderRadius:10,padding:"10px 12px",fontSize:15,fontFamily:"'Nunito',sans-serif",fontWeight:600,color:sel?"#1d4ed8":"#6b7280",background:sel?"#eff6ff":"#f9fafb",textAlign:"left",cursor:"pointer"}),
+        emisOpt:sel=>({padding:"10px 12px",borderRadius:10,border:sel?"2px solid #3b82f6":"1px solid #bfdbfe",background:sel?"#eff6ff":"#fff",color:sel?"#1d4ed8":"#374151",fontWeight:sel?700:600,fontSize:14,cursor:"pointer",textAlign:"left"}),
+        numStpr:{display:"flex",alignItems:"center",border:"1.5px solid #bfdbfe",borderRadius:10,overflow:"hidden",background:"#eff6ff"},
+        stpBtn:{width:40,height:42,border:"none",background:"transparent",fontSize:22,fontWeight:700,color:"#3b82f6",cursor:"pointer",flexShrink:0},
+        stpVal:{flex:1,textAlign:"center",fontSize:18,fontWeight:800,color:"#1e3a8a"},
+        unidRow:{display:"flex",gap:8,marginTop:4},
+        unidBtn:sel=>({flex:1,padding:"9px 0",borderRadius:10,border:sel?"2px solid #3b82f6":"1px solid #bfdbfe",background:sel?"#eff6ff":"#fff",color:sel?"#1d4ed8":"#6b7280",fontWeight:sel?800:600,fontSize:14,cursor:"pointer"}),
+        resCard:r=>({background:r.bg,border:`1.5px solid ${r.border}`,borderRadius:14,padding:"14px 16px",marginBottom:10}),
+        resBadge:r=>({display:"inline-block",background:r.color,color:"#fff",borderRadius:20,padding:"3px 12px",fontSize:12,fontWeight:800}),
+        statBox:{flex:1,background:"#f8fafc",borderRadius:10,padding:"8px 10px",textAlign:"center"},
+        saveBtn:ok=>({width:"100%",padding:"14px",borderRadius:14,border:"none",background:ok?"#3b82f6":"#bfdbfe",color:ok?"#fff":"#6b7280",fontWeight:800,fontSize:16,cursor:ok?"pointer":"not-allowed",marginBottom:10}),
+        rstBtn:{background:"transparent",border:"1.5px solid #fca5a5",color:"#ef4444",borderRadius:10,padding:"8px 0",fontWeight:700,fontSize:14,cursor:"pointer",width:"100%"},
+        histCard:{background:"#fff",borderRadius:14,padding:"14px 16px",marginBottom:10,boxShadow:"0 1px 3px rgba(0,0,0,0.06)"},
+        delBtn:{background:"transparent",border:"none",color:"#fca5a5",fontWeight:800,fontSize:20,cursor:"pointer",padding:"2px 8px"},
+        empty:{textAlign:"center",padding:"40px 20px",color:"#9ca3af"},
+        pill:r=>({display:"inline-block",background:r.bg,color:r.color,borderRadius:20,padding:"3px 10px",fontSize:12,fontWeight:800,border:`1px solid ${r.border}`}),
+        gpsBtn:(st)=>({width:30,height:30,borderRadius:8,border:"none",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,
+          background:st==="ok"?"#fee2e2":st==="loading"?"#fef3c7":st==="error"?"#f3f4f6":"#f3f4f6",
+          fontSize:14}),
+        exportBtn:{display:"flex",alignItems:"center",gap:6,padding:"8px 12px",borderRadius:10,border:"1.5px solid #bfdbfe",background:"#eff6ff",color:"#1d4ed8",fontWeight:700,fontSize:12,cursor:"pointer"},
+        mapLink:{display:"inline-flex",alignItems:"center",gap:3,padding:"3px 8px",borderRadius:6,border:"1px solid #bfdbfe",background:"#eff6ff",color:"#1d4ed8",fontWeight:700,fontSize:11,cursor:"pointer",textDecoration:"none"},
+      };
+
+      function CoefBar({label,value,type,desc}){
+        const r=rating(value,type,t);
+        return(<div style={c.resCard(r)}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+            <div>
+              <div style={{fontSize:13,fontWeight:700,color:"#374151",marginBottom:2}}>{label}</div>
+              <div style={{fontSize:32,fontWeight:900,color:r.color,lineHeight:1,marginBottom:4}}>{value.toFixed(1)}%</div>
+              <span style={c.resBadge(r)}>{r.label}</span>
+            </div>
+            <svg viewBox="0 0 64 64" width="64" height="64" style={{flexShrink:0}}>
+              <circle cx="32" cy="32" r="26" fill="none" stroke="rgba(0,0,0,0.08)" strokeWidth="6"/>
+              <circle cx="32" cy="32" r="26" fill="none" stroke={r.color} strokeWidth="6" strokeLinecap="round"
+                strokeDasharray={`${2*Math.PI*26}`}
+                strokeDashoffset={`${2*Math.PI*26*(1-(type==="cv"?Math.min(value,50)/50:value/100))}`}
+                transform="rotate(-90 32 32)" style={{transition:"stroke-dashoffset 0.5s"}}/>
+            </svg>
+          </div>
+          <div style={{fontSize:12,color:"#6b7280",marginTop:6,fontWeight:600}}>{desc}</div>
+        </div>);
+      }
+
+      // ── Medición ──────────────────────────────────────────────────────────
+      const medView=(
+        <div style={c.body}>
+          <div style={c.card}>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10}}>
+              <div><div style={c.lbl}>{t.fField}</div><input style={c.inp} placeholder={t.fField} value={field} onChange={e=>{setField(e.target.value);setSaved(false);}}/></div>
+              <div><div style={c.lbl}>{t.fSector}</div><input style={c.inp} placeholder={t.fSector} value={sector} onChange={e=>{setSector(e.target.value);setSaved(false);}}/></div>
+            </div>
+            <div style={{marginBottom:10}}>
+              <div style={c.lbl}>{t.fEmisor}</div>
+              <button style={c.selBtn(!!emisor)} onClick={()=>setShowEmisor(v=>!v)}>{emisor||t.fSelectEmisor} {showEmisor?"▲":"▼"}</button>
+              {showEmisor&&<div style={{marginTop:8,display:"flex",flexDirection:"column",gap:6}}>{t.emisores.map(e=><button key={e} style={c.emisOpt(emisor===e)} onClick={()=>{setEmisor(e);setShowEmisor(false);setSaved(false);}}>{e}</button>)}</div>}
+            </div>
+            <div style={{marginBottom:10}}>
+              <div style={c.lbl}>{t.fUnit}</div>
+              <div style={c.unidRow}>{["mm","in"].map(u=><button key={u} style={c.unidBtn(unidLectura===u)} onClick={()=>{setSistCaudal(u==="mm"?"LPH":"GPH");setSaved(false);}}>{u}</button>)}</div>
+            </div>
+            <div style={{marginBottom:10}}>
+              <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:4}}>
+                <div style={c.lbl}>{t.fCaudal}</div>
+                <span style={{fontSize:10,color:"#60a5fa",fontWeight:700,background:"#eff6ff",borderRadius:6,padding:"2px 6px"}}>{t.fOpt}</span>
+              </div>
+              <div style={{display:"flex",gap:8}}>
+                <div style={{position:"relative",flex:1}}>
+                  <input type="number" inputMode="decimal" style={{...c.inp,paddingRight:52}} placeholder="0.0" value={caudal} onChange={e=>{setCaudal(e.target.value);setSaved(false);}}/>
+                  <span style={{position:"absolute",right:12,top:"50%",transform:"translateY(-50%)",fontSize:12,color:"#60a5fa",fontWeight:800,pointerEvents:"none"}}>{sistCaudal}</span>
+                </div>
+                <div style={{display:"flex",borderRadius:10,overflow:"hidden",border:"1.5px solid #bfdbfe",flexShrink:0}}>
+                  {["LPH","GPH"].map(s=><button key={s} onClick={()=>{setSistCaudal(s);setSaved(false);}} style={{padding:"0 14px",border:"none",fontFamily:"'Nunito',sans-serif",fontWeight:800,fontSize:13,cursor:"pointer",background:sistCaudal===s?"#3b82f6":"#eff6ff",color:sistCaudal===s?"#fff":"#6b7280"}}>{s}</button>)}
+                </div>
+              </div>
+              {caudal&&!isNaN(parseFloat(caudal))&&<div style={{marginTop:6,fontSize:12,color:"#6b7280",fontWeight:600,background:"#f1f5f9",borderRadius:8,padding:"6px 10px"}}>
+                {sistCaudal==="LPH"?`= ${(parseFloat(caudal)/3.78541).toFixed(3)} GPH`:`= ${(parseFloat(caudal)*3.78541).toFixed(2)} LPH`}
+              </div>}
+            </div>
+            <div>
+              <div style={c.lbl}>{t.fDuration}</div>
+              <div style={{display:"flex",alignItems:"center",gap:8}}>
+                <div style={{position:"relative",flex:1}}>
+                  <input type="number" inputMode="numeric" style={{...c.inp,paddingRight:52}} placeholder="60" value={duracion} onChange={e=>{setDuracion(e.target.value);setSaved(false);}}/>
+                  <span style={{position:"absolute",right:12,top:"50%",transform:"translateY(-50%)",fontSize:12,color:"#60a5fa",fontWeight:800,pointerEvents:"none"}}>{t.fDurUnit}</span>
+                </div>
+                <div style={{fontSize:12,color:"#94a3b8",fontWeight:600,flexShrink:0}}>{duracion&&!isNaN(parseFloat(duracion))?`= ${(parseFloat(duracion)/60).toFixed(2)} h`:""}</div>
+              </div>
+              <div style={{fontSize:11,color:"#94a3b8",fontWeight:600,marginTop:4}}>{t.fDurHint}</div>
+            </div>
+          </div>
+
+          <div style={c.card}>
+            <div style={c.lbl}>{t.fNumMed}</div>
+            <div style={{...c.numStpr,marginTop:4}}>
+              <button style={c.stpBtn} onClick={()=>setNumCans(n=>Math.max(2,n-1))}>−</button>
+              <span style={c.stpVal}>{numCans}</span>
+              <button style={c.stpBtn} onClick={()=>setNumCans(n=>Math.min(24,n+1))}>+</button>
+            </div>
+            <div style={{fontSize:11,color:"#94a3b8",fontWeight:600,marginTop:6}}>{t.fMinMax}</div>
+          </div>
+
+          {/* ── Readings with GPS ── */}
+          <div style={c.card}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+              <div style={c.lbl}>{t.fReadings}</div>
+              <div style={{display:"flex",alignItems:"center",gap:8}}>
+                {gpsCount>0&&<span style={{fontSize:11,color:"#ef4444",fontWeight:800,background:"#fee2e2",borderRadius:6,padding:"3px 8px"}}>📍 {t.gpsPoints(gpsCount)}</span>}
+                <div style={{fontSize:11,color:"#60a5fa",fontWeight:800,background:"#eff6ff",borderRadius:6,padding:"3px 8px"}}>{unidLectura}→{sistCaudal}</div>
+              </div>
+            </div>
+
+            {/* Column headers */}
+            <div style={{display:"grid",gridTemplateColumns:"36px 1fr 90px 36px",gap:5,marginBottom:4,alignItems:"center"}}>
+              <div style={{fontSize:10,fontWeight:700,color:"#94a3b8",textAlign:"center"}}>#</div>
+              <div style={{fontSize:10,fontWeight:700,color:"#94a3b8",textAlign:"center"}}>{t.colDepth} ({unidLectura})</div>
+              <div style={{fontSize:10,fontWeight:700,color:"#3b82f6",textAlign:"center"}}>{t.colFlow} ({sistCaudal})</div>
+              <div style={{fontSize:10,fontWeight:700,color:"#ef4444",textAlign:"center"}}>📍</div>
+            </div>
+
+            {readings.map((v,i)=>{
+              const flow=toFlow(v), hasVal=v!==""&&!isNaN(parseFloat(v));
+              const st=gpsStatus[i], g=gps[i];
+              return(
+                <div key={i} style={{marginBottom:8}}>
+                  <div style={{display:"grid",gridTemplateColumns:"36px 1fr 90px 36px",gap:5,alignItems:"center"}}>
+                    <div style={{fontSize:12,fontWeight:800,color:"#6b7280",textAlign:"center"}}>#{i+1}</div>
+                    <div style={{position:"relative"}}>
+                      <input type="number" inputMode="decimal"
+                        style={{width:"100%",border:activeInput===i?"1.5px solid #3b82f6":"1.5px solid #bfdbfe",borderRadius:8,padding:"8px 26px 8px 8px",fontSize:14,fontFamily:"'Nunito',sans-serif",fontWeight:800,color:"#1e3a8a",background:activeInput===i?"#fff":"#eff6ff",outline:"none",textAlign:"center"}}
+                        placeholder="0" value={v}
+                        onChange={e=>setReading(i,e.target.value)}
+                        onFocus={()=>setActiveInput(i)} onBlur={()=>setActiveInput(null)}/>
+                      <span style={{position:"absolute",right:6,top:"50%",transform:"translateY(-50%)",fontSize:9,color:"#94a3b8",fontWeight:700,pointerEvents:"none"}}>{unidLectura}</span>
+                    </div>
+                    <div style={{background:hasVal?"#eff6ff":"#f8fafc",border:hasVal?"1.5px solid #bfdbfe":"1.5px solid #e5e7eb",borderRadius:8,padding:"8px 4px",textAlign:"center",fontSize:12,fontWeight:800,color:hasVal?"#1d4ed8":"#d1d5db"}}>
+                      {hasVal&&flow!==null?flow.toFixed(2):"—"}
+                    </div>
+                    {/* GPS button */}
+                    <button style={c.gpsBtn(st)} onClick={()=>st==="ok"?clearGPS(i):captureGPS(i)} title={st==="ok"?g.lat.toFixed(5)+", "+g.lng.toFixed(5):t.colGPS}>
+                      {st==="loading"?"⏳":st==="ok"?"📍":st==="error"?"⚠️":"📍"}
+                    </button>
+                  </div>
+                  {/* GPS info row */}
+                  {g&&(
+                    <div style={{display:"flex",alignItems:"center",gap:6,marginTop:3,paddingLeft:41}}>
+                      <span style={{fontSize:10,color:"#6b7280",fontWeight:600}}>
+                        {fmtCoord(g.lat)}, {fmtCoord(g.lng)}
+                        {g.acc&&<span style={{color:"#94a3b8"}}> ±{Math.round(g.acc)}m</span>}
+                      </span>
+                      <a href={mapsLink(g.lat,g.lng)} target="_blank" style={c.mapLink}>{t.viewMaps}</a>
+                      <a href={earthLink(g.lat,g.lng)} target="_blank" style={{...c.mapLink,background:"#f0fdf4",borderColor:"#86efac",color:"#166534"}}>{t.viewEarth}</a>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+
+            <div style={{marginTop:8,background:"#f0fdf4",borderRadius:10,padding:"8px 12px",fontSize:11,color:"#6b7280",fontWeight:600}}>
+              {t.medCount(flowValues.length,numCans)}{t.fFormula(duracion||60)}
+              {flowValues.length>=2&&results&&<span style={{color:"#16a34a",marginLeft:4}}>{t.fAvg} {results.mean.toFixed(2)} {sistCaudal}</span>}
+            </div>
+          </div>
+
+          {results&&(<div>
+            <div style={{fontSize:12,fontWeight:700,color:"#6b7280",marginBottom:8,textTransform:"uppercase",letterSpacing:0.5}}>{t.resTitle(flowValues.length)}</div>
+            {hasDiseño&&(()=>{
+              const ef=(results.mean/caudalNum)*100;
+              const rEf=ef>=90?{label:t.rEfficient,color:"#166534",bg:"#dcfce7",border:"#86efac"}:ef>=80?{label:t.rAcceptable,color:"#1d4ed8",bg:"#dbeafe",border:"#93c5fd"}:ef>=70?{label:t.rLow,color:"#92400e",bg:"#fef3c7",border:"#fcd34d"}:{label:t.rPoor,color:"#991b1b",bg:"#fee2e2",border:"#fca5a5"};
+              const diff=results.mean-caudalNum;
+              return(<div style={{background:rEf.bg,border:`1.5px solid ${rEf.border}`,borderRadius:14,padding:"14px 16px",marginBottom:10}}>
+                <div style={{fontSize:13,fontWeight:700,color:"#374151",marginBottom:8}}>{t.vsDesign}</div>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:10}}>
+                  {[{l:t.bDesign,v:caudalNum.toFixed(2),c:"#374151"},{l:t.bMeasured,v:results.mean.toFixed(2),c:rEf.color},{l:t.bEff,v:`${ef.toFixed(1)}%`,c:rEf.color}].map(s=>(
+                    <div key={s.l} style={{background:"rgba(255,255,255,0.6)",borderRadius:10,padding:"8px 6px",textAlign:"center"}}>
+                      <div style={{fontSize:16,fontWeight:900,color:s.c}}>{s.v}</div>
+                      <div style={{fontSize:10,color:"#94a3b8",fontWeight:700,marginTop:2}}>{s.l}</div>
+                    </div>
+                  ))}
+                </div>
+                <div style={{fontSize:12,fontWeight:700,color:rEf.color,marginBottom:6}}>{diff>0?`+${diff.toFixed(2)}`:diff.toFixed(2)} {sistCaudal} · {rEf.label}</div>
+                <div style={{fontSize:11,fontWeight:700,color:"#6b7280",marginBottom:4}}>{t.devTitle}</div>
+                {readings.map((v,i)=>{
+                  const f=toFlow(v);if(f===null)return null;
+                  const dev=(f-caudalNum)/caudalNum*100,isOver=dev>=0;
+                  return(<div key={i} style={{display:"flex",alignItems:"center",gap:6,marginBottom:4}}>
+                    <span style={{fontSize:11,fontWeight:700,color:"#6b7280",width:24,flexShrink:0}}>#{i+1}</span>
+                    <span style={{fontSize:11,fontWeight:800,color:"#1e3a8a",width:44,textAlign:"right",flexShrink:0}}>{f.toFixed(2)}</span>
+                    <div style={{flex:1,height:8,background:"rgba(0,0,0,0.08)",borderRadius:4,position:"relative"}}>
+                      <div style={{position:"absolute",left:isOver?"50%":`${Math.max(0,50+dev/2)}%`,width:`${Math.min(50,Math.abs(dev)/2)}%`,height:"100%",borderRadius:4,background:isOver?"#16a34a":"#ef4444"}}/>
+                      <div style={{position:"absolute",left:"50%",top:-2,width:2,height:12,background:"rgba(0,0,0,0.2)",borderRadius:1}}/>
+                    </div>
+                    <span style={{fontSize:11,fontWeight:800,color:isOver?"#16a34a":"#ef4444",width:42,textAlign:"right",flexShrink:0}}>{isOver?"+":""}{dev.toFixed(1)}%</span>
+                    {gps[i]&&<span style={{fontSize:11}}>📍</span>}
+                  </div>);
+                })}
+              </div>);
+            })()}
+            <CoefBar label={t.duLabel} value={results.du} type="du" desc={t.duDesc(results.q25)}/>
+            <CoefBar label={t.cvLabel} value={results.cv} type="cv" desc={t.cvDesc}/>
+            <div style={c.card}>
+              <div style={c.lbl}>{t.statsTitle} ({sistCaudal})</div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:6}}>
+                {[{l:"Min",v:results.min.toFixed(2)},{l:"Max",v:results.max.toFixed(2)},{l:"μ",v:results.mean.toFixed(2)},{l:"σ",v:results.sd.toFixed(2)}].map(s=>(
+                  <div key={s.l} style={c.statBox}><div style={{fontSize:16,fontWeight:900,color:"#1e3a8a"}}>{s.v}</div><div style={{fontSize:10,color:"#94a3b8",fontWeight:700}}>{s.l}</div></div>
+                ))}
+              </div>
+            </div>
+          </div>)}
+
+          {!results&&flowValues.length<2&&<div style={{textAlign:"center",padding:"20px",color:"#94a3b8",fontWeight:600}}>{t.minReadings}</div>}
+          <button style={c.saveBtn(!!results&&!saved)} onClick={saveSession} disabled={!results||saved}>{saved?t.sSaved:t.sSave}</button>
+          <button style={c.rstBtn} onClick={resetForm}>{t.sClear}</button>
+        </div>
+      );
+
+      // ── Historial ─────────────────────────────────────────────────────────
+      const histView=(
+        <div style={c.body}>
+          {sessions.length===0?(
+            <div style={c.empty}><div style={{fontSize:40,marginBottom:12}}>💧</div><div style={{fontWeight:700,fontSize:16}}>{t.emptyHist}</div><div style={{fontSize:14,marginTop:4}}>{t.emptyHistSub}</div></div>
+          ):sessions.map(s=>{
+            const sT=LANGS[s.lang]||LANGS.es,r=s.results;
+            const rDu=rating(r.du,"du",sT),rCv=rating(r.cv,"cv",sT);
+            const sGps=(s.gps||[]).filter(Boolean);
+            return(<div key={s.id} style={c.histCard}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                <div style={{flex:1}}>
+                  <div style={{fontSize:12,color:"#9ca3af",fontWeight:600}}>{fmtDate(s.date)}</div>
+                  <div style={{fontWeight:800,color:"#1d4ed8",fontSize:15,margin:"2px 0 4px"}}>{[s.field,s.sector].filter(Boolean).join(" · ")||"—"}</div>
+                  <div style={{fontSize:12,color:"#6b7280",fontWeight:600,marginBottom:8}}>
+                    {[s.emisor,`${s.numCans} pts`,s.unidad,s.duracion&&`${s.duracion} min`].filter(Boolean).join(" · ")}
+                    {s.caudal&&!isNaN(parseFloat(s.caudal))&&<span> · <span style={{color:"#3b82f6",fontWeight:700}}>{parseFloat(s.caudal).toFixed(2)} {s.sistCaudal}</span></span>}
+                  </div>
+                  <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:8}}>
+                    <span style={c.pill(rDu)}>DU {r.du.toFixed(1)}%</span>
+                    <span style={c.pill(rCv)}>CV {r.cv.toFixed(1)}%</span>
+                    {sGps.length>0&&<span style={{...c.pill({color:"#dc2626",bg:"#fee2e2",border:"#fca5a5"})}}>📍 {sT.gpsPoints(sGps.length)}</span>}
+                  </div>
+                  <div style={{fontSize:11,color:"#94a3b8",fontWeight:600,marginBottom:sGps.length>0?8:0}}>μ {r.mean.toFixed(2)} {s.sistCaudal} · σ {r.sd.toFixed(2)} · n={r.n}</div>
+
+                  {/* GPS points list */}
+                  {sGps.length>0&&(
+                    <div style={{background:"#f8fafc",borderRadius:10,padding:"8px 10px",marginBottom:8}}>
+                      {(s.gps||[]).map((g,i)=>g?(
+                        <div key={i} style={{display:"flex",alignItems:"center",gap:6,marginBottom:4}}>
+                          <span style={{fontSize:11,fontWeight:800,color:"#ef4444",width:24}}>#{i+1}</span>
+                          <span style={{fontSize:10,color:"#6b7280",fontWeight:600,flex:1}}>{fmtCoord(g.lat)}, {fmtCoord(g.lng)}</span>
+                          <a href={mapsLink(g.lat,g.lng)} target="_blank" style={c.mapLink}>{sT.viewMaps}</a>
+                          <a href={earthLink(g.lat,g.lng)} target="_blank" style={{...c.mapLink,background:"#f0fdf4",borderColor:"#86efac",color:"#166534"}}>{sT.viewEarth}</a>
+                        </div>
+                      ):null)}
+                    </div>
+                  )}
+
+                  {/* Export buttons */}
+                  <div style={{display:"flex",gap:8}}>
+                    <button style={c.exportBtn} onClick={()=>handleExportKML(s)}>
+                      🌍 {sT.exportKML}
+                    </button>
+                    <button style={{...c.exportBtn,background:"#f0fdf4",borderColor:"#86efac",color:"#166534"}} onClick={()=>handleExportCSV(s)}>
+                      📊 {sT.exportCSV}
+                    </button>
+                  </div>
+                </div>
+                <button style={c.delBtn} onClick={()=>deleteSession(s.id)}>×</button>
+              </div>
+            </div>);
+          })}
+        </div>
+      );
+
+      // ── Ayuda ─────────────────────────────────────────────────────────────
+      const helpView=(
+        <div style={c.body}>
+          <div style={c.card}>
+            <div style={{fontWeight:800,fontSize:15,color:"#1d4ed8",marginBottom:10}}>{t.hCoefs}</div>
+            {[{name:t.hDuName,formula:t.hDuFormula,desc:t.hDuDesc},{name:t.hCvName,formula:t.hCvFormula,desc:t.hCvDesc}].map(f=>(
+              <div key={f.name} style={{marginBottom:14,paddingBottom:14,borderBottom:"1px solid #e5e7eb"}}>
+                <div style={{fontWeight:800,fontSize:14,color:"#374151"}}>{f.name}</div>
+                <div style={{fontFamily:"monospace",background:"#f1f5f9",borderRadius:8,padding:"6px 10px",fontSize:13,color:"#0f172a",margin:"4px 0",fontWeight:600}}>{f.formula}</div>
+                <div style={{fontSize:13,color:"#6b7280",fontWeight:600}}>{f.desc}</div>
+              </div>
+            ))}
+          </div>
+          <div style={c.card}>
+            <div style={{fontWeight:800,fontSize:15,color:"#1d4ed8",marginBottom:8}}>{t.hClass}</div>
+            <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+              <thead><tr style={{background:"#f1f5f9"}}>
+                <th style={{padding:"8px 10px",textAlign:"left",color:"#374151",fontWeight:800}}>{t.hCat}</th>
+                <th style={{padding:"8px 10px",textAlign:"center",color:"#374151",fontWeight:800}}>{t.hDu}</th>
+                <th style={{padding:"8px 10px",textAlign:"center",color:"#374151",fontWeight:800}}>{t.hCv}</th>
+              </tr></thead>
+              <tbody>{t.hRows.map(row=>(
+                <tr key={row.cat} style={{background:row.bg}}>
+                  <td style={{padding:"8px 10px",fontWeight:800,color:row.color}}>{row.cat}</td>
+                  <td style={{padding:"8px 10px",textAlign:"center",fontWeight:700,color:row.color}}>{row.du}</td>
+                  <td style={{padding:"8px 10px",textAlign:"center",fontWeight:700,color:row.color}}>{row.cv}</td>
+                </tr>
+              ))}</tbody>
+            </table>
+            <div style={{fontSize:11,color:"#94a3b8",marginTop:8,fontWeight:600}}>{t.hRef}</div>
+          </div>
+          <div style={c.card}>
+            <div style={{fontWeight:800,fontSize:15,color:"#1d4ed8",marginBottom:8}}>{t.hProtocol}</div>
+            {t.hSteps.map((s,i)=>(
+              <div key={i} style={{display:"flex",gap:10,marginBottom:8}}>
+                <div style={{width:22,height:22,borderRadius:"50%",background:"#eff6ff",color:"#1d4ed8",fontWeight:800,fontSize:12,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>{i+1}</div>
+                <div style={{fontSize:13,color:"#374151",fontWeight:600,paddingTop:3}}>{s}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+
+      return(
+        <div style={c.wrap}>
+          <div style={c.header}>
+            <div style={c.hRow}>
+              <div style={c.logo}><DropIcon size={36}/><span style={c.title}>{t.appTitle}</span></div>
+              <div style={c.langArea}>
+                <button style={c.langBtn} onClick={()=>setShowLang(v=>!v)}>{LANG_OPTIONS.find(l=>l.key===lang)?.label} ▾</button>
+                {showLang&&<div style={c.langDrop}>{LANG_OPTIONS.map(l=><button key={l.key} style={c.langOpt(lang===l.key)} onClick={()=>changeLang(l.key)}>{l.label}</button>)}</div>}
+              </div>
+            </div>
+          </div>
+          <div style={c.tabs}>
+            <button style={c.tab(tab==="med")}  onClick={()=>setTab("med")}>{t.tabs.med}</button>
+            <button style={c.tab(tab==="hist")} onClick={()=>setTab("hist")}>{t.tabs.hist}{sessions.length>0?` (${sessions.length})`:""}</button>
+            <button style={c.tab(tab==="help")} onClick={()=>setTab("help")}>{t.tabs.help}</button>
+          </div>
+          {tab==="med"  && medView}
+          {tab==="hist" && histView}
+          {tab==="help" && helpView}
+          <div style={{textAlign:"right",padding:"8px 16px 16px",fontSize:11,color:"#94a3b8",fontWeight:700,letterSpacing:0.3}}>by Zenit</div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+  </script>
+</body>
+</html>
