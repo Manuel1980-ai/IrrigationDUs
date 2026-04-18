@@ -1,0 +1,9 @@
+workflows:
+ionic-workflow:
+name: Ionic Workflow
+instance_type: mac_mini_m2
+scripts:
+- name: Install dependencies
+script: npm install
+- name: Build Ionic App
+script: ionic build
